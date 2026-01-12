@@ -55,6 +55,12 @@ export const deleteBookContent = async (bookId: number | string) => {
 const DEFAULT_SETTINGS: AppSettings = {
   language: 'fr',
   theme: 'light',
+  reader: {
+    fontSize: 24,
+    fontWeight: 'normal',
+    fontFamily: 'System',
+    lineHeightScale: 1.5
+  }
 };
 
 export const saveSettings = async (settings: AppSettings) => {

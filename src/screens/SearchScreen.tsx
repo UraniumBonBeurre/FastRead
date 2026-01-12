@@ -30,7 +30,7 @@ export default function SearchScreen() {
     if (loading || !hasMore) return;
     setLoading(true);
     try {
-      let response;
+      let response: any;
       if (query.length > 0) {
         // Find books by search (pagination not implemented for search in this simple V1)
         response = await searchBooks(query, settings.language);

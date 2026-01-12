@@ -22,7 +22,7 @@ export default function SettingsScreen() {
       <ScrollView contentContainerStyle={styles.content}>
         
         {/* Language Section */}
-        <View style={[styles.section, { backgroundColor: theme.cardBackground, shadowColor: theme.shadow }]}>
+        <View style={[styles.section, { backgroundColor: theme.cardBackground, shadowColor: '#000' }]}>
           <Text style={[styles.sectionHeader, { color: theme.subText }]}>{t.lang_section}</Text>
           <View style={[styles.row, { borderBottomColor: theme.border }]}>
             <Text style={[styles.label, { color: theme.text }]}>{settings.language === 'fr' ? 'Français' : 'English'}</Text>
@@ -33,7 +33,7 @@ export default function SettingsScreen() {
         </View>
 
         {/* Appearance Section */}
-        <View style={[styles.section, { backgroundColor: theme.cardBackground, shadowColor: theme.shadow }]}>
+        <View style={[styles.section, { backgroundColor: theme.cardBackground, shadowColor: '#000' }]}>
           <Text style={[styles.sectionHeader, { color: theme.subText }]}>{t.appearance_section}</Text>
           <View style={[styles.row, { borderBottomColor: theme.border }]}>
              <Text style={[styles.label, { color: theme.text }]}>{t.dark_mode}</Text>
