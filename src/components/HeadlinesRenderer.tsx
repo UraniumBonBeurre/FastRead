@@ -1,12 +1,5 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  Dimensions,
-  Platform,
-  PanResponder,
-} from 'react-native';
+import React, { useMemo, useRef, useEffect, useState } from 'react';
+import { View, Text, StyleSheet, Platform, PanResponder, useWindowDimensions, Dimensions } from 'react-native';
 import Animated, {
   SharedValue,
   useAnimatedStyle,
@@ -25,18 +18,23 @@ interface HeadlinesRendererProps {
     text: string;
     background: string;
     dimText: string;
-    fontFamily?: string; 
+    fontFamily?: string;
+    fontWeight?: string;
   };
   onScroll?: (index: number) => void;
   onScrollEnd?: (index: number) => void;
 }
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
+// Optimized multiplier to balance gap vs overlap.
+// 0.6 is standard Courier ratio.
+// 0.65 is a safe compromise for Menlo/monospace.
+const CHAR_W_MULTIPLIER = 0.65; 
+// Windowing: keep a limited number of words in a single Text line
+const WINDOW_WORDS = 400; // total words in window
+const WINDOW_BACK = 150;  // how many words kept behind current index
 
-// Monospace Layout Config
-const MONOSPACE_RATIO = 0.6; 
-// Large buffer for smooth scrolling
-const BUFFER_SIZE = 500; 
+// Initial screen width (fallback)
+const INITIAL_WIDTH = Dimensions.get('window').width;
 
 export const HeadlinesRenderer: React.FC<HeadlinesRendererProps> = ({
   content,
@@ -47,39 +45,95 @@ export const HeadlinesRenderer: React.FC<HeadlinesRendererProps> = ({
   onScroll,
   onScrollEnd,
 }) => {
-  // 1. Calculate Global Offsets
-  // Utilizing standard Array to ensure maximum compatibility with Reanimated bridge
-  const globalCharOffsets = useMemo(() => {
-    if (!content || content.length === 0) return [];
-    const offsets = new Array(content.length);
-    let acc = 0;
-    for (let i = 0; i < content.length; i++) {
-        offsets[i] = acc;
-        acc += content[i].length + 1; // +1 for space
-    }
-    return offsets;
-  }, [content]);
+  const { width: windowWidth } = useWindowDimensions();
+  // Initialize with a real value to prevent "jump" or NaN
+  const safeScreenWidth = useSharedValue(INITIAL_WIDTH);
 
-  // Shared value for the offsets
-  const sharedOffsets = useSharedValue<number[]>([]);
-
-  // Update shared value whenever content changes
   useEffect(() => {
-    if (globalCharOffsets.length > 0) {
-        sharedOffsets.value = globalCharOffsets;
-        // console.log("[HeadlinesRenderer] Shared offsets updated, length:", globalCharOffsets.length);
+    safeScreenWidth.value = windowWidth;
+  }, [windowWidth]);
+
+  // Shared Value for the offsets OF THE CURRENT WINDOW ONLY
+  const windowWordOffsets = useSharedValue<number[]>([]);
+  const activeWindowStartWord = useSharedValue(0);
+
+
+
+  // Initialize window when content loads
+  useEffect(() => {
+    if (content.length > 0) {
+      updateWindow(0); // This is cheap now (slice only)
     }
-  }, [globalCharOffsets]);
+  }, [content.length]);
 
-  // Track the START index of the currently rendered window
-  const windowStartIndex = useSharedValue(0);
-  const [windowInfo, setWindowInfo] = useState({ text: "", startIndex: 0 });
+  // Drive window updates from progress (throttled by window bounds)
+  const lastWindowStart = useSharedValue(0);
+  
+  useAnimatedReaction(
+    () => Math.floor(progress.value),
+    (idx, prevIdx) => {
+      // Logic inside worklet
+      const start = lastWindowStart.value;
+      const end = start + WINDOW_WORDS;
+      
+      // If we leave the safe window, we need to update
+      if (idx < start + WINDOW_BACK * 0.5 || idx > end - WINDOW_BACK * 0.5) {
+        // Only trigger update if we actually changed significantly or initialized
+        // const newStart = Math.max(0, idx - WINDOW_BACK);
+        // lastWindowStart.value = newStart; 
+        // We update the shared value but we really just need to call JS.
+        // Actually, let's just delegate calculation to JS to ensure sync
+        runOnJS(updateWindow)(idx);
+        lastWindowStart.value = Math.max(0, idx - WINDOW_BACK);
+      }
+    },
+    [progress, WINDOW_WORDS, WINDOW_BACK]
+  );
 
-  // Haptics
-  const triggerHaptic = () => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
-  };
+  const charWidth = fontSize * CHAR_W_MULTIPLIER;
+  const fontFamily = Platform.OS === 'ios' ? 'Menlo' : 'monospace';
 
+  // Windowed text state
+  const [windowText, setWindowText] = useState('');
+  const [windowStartWord, setWindowStartWord] = useState(0);
+  const [windowStartChar, setWindowStartChar] = useState(0);
+
+  // Helper to update window state on JS thread
+  const updateWindow = React.useCallback((centerWord: number) => {
+    // Safety check for content (might be empty during init)
+    if (!content || content.length === 0) return;
+    
+    // Define window bounds
+    const start = Math.max(0, centerWord - WINDOW_BACK);
+    const end = Math.min(content.length, start + WINDOW_WORDS);
+    
+    // Slice content
+    const wordsSlice = content.slice(start, end);
+    const textSlice = wordsSlice.join(' ');
+    
+    // Calculate LOCAL offsets for this slice
+    // This assumes the text rendered starts at 0 relative pixels
+    // We strictly map word index i (relative to start) to char offset
+    const localOffsets = new Array(wordsSlice.length);
+    let acc = 0;
+    for (let i = 0; i < wordsSlice.length; i++) {
+        localOffsets[i] = acc;
+        acc += wordsSlice[i].length + 1; // +1 for space
+    }
+    
+    // Update Shared Values
+    windowWordOffsets.value = localOffsets;
+    activeWindowStartWord.value = start;
+    
+    // Update State for React Render
+    setWindowStartWord(start);
+    setWindowStartChar(0); // Not used anymore but kept for state shape consistency if needed
+    setWindowText(textSlice);
+  }, [content]); // Dependencies for useCallback
+
+
+
+  // Pan Responder
   const panResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
@@ -88,132 +142,102 @@ export const HeadlinesRenderer: React.FC<HeadlinesRendererProps> = ({
         isInteracting.value = true;
       },
       onPanResponderMove: (_, gestureState) => {
-        const charWidth = fontSize * MONOSPACE_RATIO;
         const deltaChars = -gestureState.dx / charWidth;
         const newProgress = Math.max(0, Math.min(progress.value + deltaChars, content.length - 1));
         progress.value = newProgress;
-        
-        if (onScroll) runOnJS(onScroll)(Math.floor(newProgress));
+        runOnJS(onScroll || (() => {}))(Math.floor(newProgress));
       },
       onPanResponderRelease: () => {
         isInteracting.value = false;
-        if (onScrollEnd) runOnJS(onScrollEnd)(Math.floor(progress.value));
+        runOnJS(onScrollEnd || (() => {}))(Math.floor(progress.value));
       },
       onPanResponderTerminate: () => {
         isInteracting.value = false;
-        if (onScrollEnd) runOnJS(onScrollEnd)(Math.floor(progress.value));
+        runOnJS(onScrollEnd || (() => {}))(Math.floor(progress.value));
       },
     })
   ).current;
 
-  // Window Update Logic
-  const updateWindow = (idx: number) => {
-    if (!content || content.length === 0) return;
+  // Animation: smooth translation using word fraction
+  const containerStyle = useAnimatedStyle(() => {
+    const offsets = windowWordOffsets.value;
+    const offsetStartWord = activeWindowStartWord.value;
+    const screenW = safeScreenWidth.value;
 
-    const safeIdx = Math.max(0, Math.min(idx, content.length - 1));
-    const start = Math.max(0, safeIdx - BUFFER_SIZE);
-    const end = Math.min(content.length, safeIdx + BUFFER_SIZE);
-    
-    // Check redundancy to avoid unnecessary state updates (which cause re-renders)
-    // We only update if the cursor is nearing the edge of the visible window
-    const currentStart = windowInfo.startIndex;
-    const currentLength = windowInfo.text ? windowInfo.text.split(' ').length : 0;
-    const center = currentStart + (currentLength / 2);
-    
-    // If we are within 200 words of the center of current window, don't update
-    if (windowInfo.text.length > 0 && Math.abs(safeIdx - center) < 200) {
-        return;
-    }
-
-    const slice = content.slice(start, end);
-    const text = slice.join(' ');
-    
-    setWindowInfo({ text, startIndex: start });
-    windowStartIndex.value = start;
-  };
-
-  useAnimatedReaction(
-    () => Math.floor(progress.value),
-    (curr, prev) => {
-      if (curr !== prev) {
-         runOnJS(triggerHaptic)();
-         runOnJS(updateWindow)(curr);
-      }
-    },
-    [content, windowInfo]
-  );
-  
-  // Initial Load - Force ensure text is set
-  useEffect(() => {
-    updateWindow(Math.floor(progress.value));
-  }, [content]);
-
-  const charWidth = fontSize * MONOSPACE_RATIO;
-  const fontFamily = Platform.OS === 'ios' ? 'Courier' : 'monospace';
-
-  const animatedStyle = useAnimatedStyle(() => {
-    const offsets = sharedOffsets.value;
-    
-    // Fallback if data isn't ready: don't move, but stay visible at 0
-    if (!offsets || offsets.length === 0) {
-        return { transform: [{ translateX: 0 }] };
+    if (!offsets || offsets.length === 0 || windowText.length === 0) {
+      return { transform: [{ translateX: 0 }] };
     }
 
     const idx = progress.value;
     const floorIdx = Math.floor(idx);
+    
+    // Calculate local index in the active window
+    const localIdx = floorIdx - offsetStartWord;
+    
+    // Safety check: if we haven't updated yet, fallback
+    if (localIdx < 0 || localIdx >= offsets.length) {
+       return { transform: [{ translateX: screenW/2 }] };
+    }
+
     const fraction = idx - floorIdx;
     
-    const safeFloorIdx = Math.min(floorIdx, offsets.length - 1);
+    // Get offsets (local to the rendered string)
+    const baseChar = offsets[localIdx]; 
     
-    // Position of the cursor in GLOBAL characters
-    const globalStartChar = offsets[safeFloorIdx];
-    
-    // Calculate current word length safely from offsets
-    let wordLen = 0;
-    if (safeFloorIdx < offsets.length - 1) {
-        wordLen = offsets[safeFloorIdx + 1] - offsets[safeFloorIdx] - 1; // -1 for space
-    } else {
-        wordLen = 5; // Fallback
-    }
-    
-    const globalCurrentChar = globalStartChar + (wordLen * fraction);
+    let wordLen = 5;
+    if (localIdx < offsets.length - 1) {
+       wordLen = Math.max(1, offsets[localIdx + 1] - baseChar - 1);
+    } 
 
-    // Window Start Global Char Key
-    const winStartIdx = windowStartIndex.value;
+    // The rendered text always starts at x=0 in its container
+    // So we just need to shift left by the current char position
+    const globalCharPos = baseChar + (wordLen * fraction);
     
-    // To calculate local offset: GlobalPos - WindowStartGlobalPos
-    const windowStartGlobalChar = (winStartIdx < offsets.length) ? offsets[winStartIdx] : 0;
-
-    // Relative Char Offset
-    const relativeCharOffset = globalCurrentChar - windowStartGlobalChar;
-
-    const translateX = (SCREEN_WIDTH / 2) - (relativeCharOffset * charWidth);
+    const translation = (screenW / 2) - (globalCharPos * charWidth);
 
     return {
-      transform: [{ translateX }]
+      transform: [{ translateX: translation }]
     };
   });
 
+  // Single long line rendering (no chunks)
+  const renderedLine = (
+    <Text
+      style={{
+        position: 'absolute',
+        left: 0,
+        top: '50%',
+        marginTop: -fontSize,
+        fontSize,
+        lineHeight: fontSize * 1.4,
+        height: fontSize * 2,
+        color: theme.text,
+        fontFamily,
+        fontWeight: (theme.fontWeight as any) || '500',
+        includeFontPadding: false,
+        textAlignVertical: 'center',
+        width: windowText.length * charWidth,
+        minWidth: windowText.length * charWidth,
+        letterSpacing: 0,
+      }}
+      numberOfLines={1}
+      selectable={false}
+    >
+      {windowText}
+    </Text>
+  );
+
   return (
-    <View style={styles.container} {...panResponder.panHandlers}>
+    <View style={[styles.container, { width: windowWidth }]} {...panResponder.panHandlers}>
       <View style={[styles.cursor, { backgroundColor: theme.dimText || '#007AFF' }]} />
-      <Animated.View style={[styles.textRow, animatedStyle]}>
-        <Text 
-            style={[
-                styles.text, 
-                { 
-                    fontSize, 
-                    color: theme.text,
-                    fontFamily: fontFamily, 
-                    fontWeight: '500', 
-                    width: 500000, // Giant width
-                }
-            ]}
-            numberOfLines={1}
-            selectable={false}
-        >
-          {windowInfo.text || content.slice(0, 50).join(' ')}
-        </Text>
+      
+      {/* 
+        The "Belt" layer. 
+        It contains absolute positioned chunks.
+        The container itself is translated.
+      */}
+      <Animated.View style={[styles.belt, containerStyle]}>
+        {renderedLine}
       </Animated.View>
     </View>
   );
@@ -222,7 +246,6 @@ export const HeadlinesRenderer: React.FC<HeadlinesRendererProps> = ({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    width: SCREEN_WIDTH,
     justifyContent: 'center',
     alignItems: 'center',
     overflow: 'hidden',
@@ -237,18 +260,13 @@ const styles = StyleSheet.create({
     left: '50%',
     marginLeft: -1,
     zIndex: 10,
-    opacity: 0.5
   },
-  textRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    // We don't set a fixed width, just let it grow.
-    // The Container overflow:hidden cuts it off.
-    minWidth: SCREEN_WIDTH, 
-  },
-  text: {
-    textAlign: 'left',
-    includeFontPadding: false,
-    textAlignVertical: 'center',
-  },
+  belt: {
+    // Zero-width anchor; text inside carries its own width
+    width: 0,
+    height: '100%',
+    position: 'absolute',
+    left: 0,
+    top: 0
+  }
 });

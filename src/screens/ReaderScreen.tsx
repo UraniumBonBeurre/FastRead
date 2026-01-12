@@ -58,6 +58,8 @@ export default function ReaderScreen() {
     const startPosition = useSharedValue(0);
     const windowStartIndex = useSharedValue(0);
     const itemLayouts = useSharedValue<Record<number, { width: number }>>({});
+    // Store word lengths in a shared value for high-performance access in the UI thread
+    const sharedWordLengths = useSharedValue<number[]>([]);
 
     // ==================== REFS ====================
     const [baseIndex, setBaseIndex] = useState(initialIndex || 0);
@@ -106,6 +108,11 @@ export default function ReaderScreen() {
             setContent(words);
             setChapters(chaps);
             contentLength.value = words.length;
+            
+            // Shared Lengths for Ticker
+            const lengths = words.map(w => w.length + 1);
+            sharedWordLengths.value = lengths;
+
             setLoading(false);
 
             const exists = myBooks.find(b => b.bookId === bookId);
@@ -160,13 +167,13 @@ export default function ReaderScreen() {
         saveCurrentProgress();
     }, [saveCurrentProgress]);
 
+    // OPTIMIZATION: Skip all syncing in ticker mode (no JS bridge traffic during playback)
     useAnimatedReaction(
         () => Math.round(progress.value),
         (current, previous) => {
-            if (current !== previous) {
+            if (!isTickerMode && current !== previous) {
                 const diff = Math.abs(current - baseIndex);
-                // Reduce threshold to sync more frequently
-                if (diff > (isTickerMode ? 50 : 1)) {
+                if (diff >= 1) {
                     runOnJS(syncState)(current);
                 }
                 if (isInteracting.value) {
@@ -189,25 +196,18 @@ export default function ReaderScreen() {
         }
 
         if (isTickerMode) {
-            // TICKER MODE: Smoother simple increment for Monospace renderer
+            // TICKER MODE: Pure WPM-based (simplest & smoothest)
             const dt = frameInfo.timeSincePreviousFrame || 16;
-            const safeDt = Math.min(dt, 50);
-            
-            // Simple WPM based increment:
-            // Words per second = wpm / 60
-            // Increment per ms = (wpm / 60) / 1000
-            // Increment = Increment per ms * dt
-            const increment = (wpm / 60000) * safeDt;
+            const safeDt = dt > 100 ? 16 : dt;
 
-            if (increment === increment && isFinite(increment)) {
-                progress.value += increment;
-                
-                if (progress.value < 0) progress.value = 0;
-                if (progress.value >= contentLength.value - 1) {
-                    progress.value = contentLength.value - 1;
-                    runOnJS(setWpm)(0);
-                }
-                targetIndex.value = Math.floor(progress.value);
+            // Simple: wpm/60/1000 * dt
+            const increment = (wpm / 60000) * safeDt;
+            progress.value += increment;
+            
+            if (progress.value < 0) progress.value = 0;
+            if (progress.value >= contentLength.value - 1) {
+                progress.value = contentLength.value - 1;
+                runOnJS(setWpm)(0);
             }
         } else {
             // RSVP MODE: Constant time per word
